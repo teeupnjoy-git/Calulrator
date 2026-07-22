@@ -8,7 +8,10 @@ Microsoft Store 계정이나 로그인 없이 설치할 수 있습니다.
 ---------
 - Calculator_x64.msixbundle   : 계산기 앱 패키지 (x64)
 - Calculator.cer              : 위 패키지에 서명한 자체 서명 공개 인증서
-- Install.ps1                 : 인증서 신뢰 등록 + 앱 설치 자동 스크립트
+- Dependencies\               : 의존 프레임워크 패키지 (Microsoft.UI.Xaml.2.8,
+                                VCLibs, .NET Native 등). Microsoft 정식 서명본이라
+                                별도 신뢰가 필요 없으며, 앱 설치에 반드시 필요합니다.
+- Install.ps1                 : 인증서 신뢰 등록 + 의존성 + 앱 설치 자동 스크립트
 - Uninstall.ps1               : 앱 제거 스크립트
 - README-INSTALL.txt          : 이 파일
 
@@ -33,7 +36,12 @@ Microsoft Store 계정이나 로그인 없이 설치할 수 있습니다.
 ------------------
 1. Calculator.cer 더블클릭 -> "인증서 설치" -> 저장소 위치 "로컬 컴퓨터"
    -> "모든 인증서를 다음 저장소에 저장" -> 찾아보기 -> "신뢰할 수 있는 사람" 선택 -> 완료.
-2. Calculator_x64.msixbundle 더블클릭 -> "설치".
+2. Dependencies\ 폴더 안의 .appx 파일들을 먼저 각각 더블클릭해 설치
+   (Microsoft.UI.Xaml.2.8, VCLibs, .NET Native 등. 이미 설치돼 있으면 건너뜀).
+3. Calculator_x64.msixbundle 더블클릭 -> "설치".
+
+주의: 방법 A(Install.ps1)를 쓰면 위 의존성이 자동 처리되므로 방법 A를 권장합니다.
+      의존 프레임워크 없이 앱만 설치하면 0x80073CF3 오류가 납니다.
 
 
 제거

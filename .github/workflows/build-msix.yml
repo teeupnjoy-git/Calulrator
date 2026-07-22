@@ -119,6 +119,30 @@ jobs:
           $pkgName = "Calculator_x64$($pkg.Extension)"
           Copy-Item $pkg.FullName (Join-Path $dist $pkgName)
           Export-Certificate -Cert $cert -FilePath (Join-Path $dist "Calculator.cer") | Out-Null
+
+          # 5-1) 의존 프레임워크 패키지 포함 (Microsoft.UI.Xaml.2.8, VCLibs, .NET Native 등)
+          #      sideload 설치 시 이 프레임워크들이 없으면 0x80073CF3 로 실패한다.
+          #      이들은 Microsoft 정식 서명 패키지라 별도 신뢰가 필요 없다.
+          $testDir = Split-Path -Parent $pkg.FullName
+          $depX64  = Join-Path $testDir "Dependencies\x64"
+          $depDst  = Join-Path $dist "Dependencies"
+          New-Item -ItemType Directory -Force -Path $depDst | Out-Null
+          if (Test-Path $depX64) {
+            Copy-Item -Path (Join-Path $depX64 "*") -Destination $depDst -Recurse -Force
+          } else {
+            Write-Host "경고: x64 의존성 폴더를 찾지 못했습니다: $depX64"
+            # 대비책: 아키텍처 무관하게 Dependencies 하위의 x64/neutral 패키지 수집
+            $depRoot = Join-Path $testDir "Dependencies"
+            if (Test-Path $depRoot) {
+              Get-ChildItem -Path $depRoot -Recurse -File |
+                Where-Object { $_.Extension -in '.appx','.msix' -and $_.FullName -match '\\(x64|neutral|Win32)\\' } |
+                Copy-Item -Destination $depDst -Force
+            }
+          }
+          $depCount = (Get-ChildItem -Path $depDst -File -ErrorAction SilentlyContinue).Count
+          Write-Host "포함된 의존 프레임워크 패키지 수: $depCount"
+          Get-ChildItem -Path $depDst -File -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  $($_.Name)" }
+          if ($depCount -eq 0) { throw "의존 프레임워크 패키지를 하나도 찾지 못했습니다. 설치가 실패할 수 있어 빌드를 중단합니다." }
           Copy-Item "$env:GITHUB_WORKSPACE/packaging/Install.ps1"        (Join-Path $dist "Install.ps1")
           Copy-Item "$env:GITHUB_WORKSPACE/packaging/Uninstall.ps1"      (Join-Path $dist "Uninstall.ps1")
           Copy-Item "$env:GITHUB_WORKSPACE/packaging/README-INSTALL.txt" (Join-Path $dist "README-INSTALL.txt")
