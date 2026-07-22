@@ -52,7 +52,9 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          msbuild ./src/Calculator/Calculator.csproj `
+          # 개별 csproj 가 아니라 솔루션(.slnx)을 빌드해야 C++ 프로젝트 간
+          # 참조/인클루드 경로($(SolutionDir) 기준)가 올바르게 해석된다.
+          msbuild ./src/Calculator.slnx `
             -restore `
             -p:Configuration=Release `
             -p:Platform=x64 `
