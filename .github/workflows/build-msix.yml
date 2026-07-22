@@ -1,0 +1,151 @@
+name: Build Calculator MSIX (sideload)
+
+# 목적: microsoft/calculator 소스를 GitHub Actions Windows 러너에서 빌드하여
+# 자체 서명된 .msixbundle 을 만들고, 사용자가 Microsoft Store/로그인 없이
+# 설치할 수 있는 zip(패키지 + 인증서 + 설치 스크립트)을 아티팩트/릴리스로 배포한다.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-msix.yml'
+      - 'packaging/**'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build and sign MSIX (x64)
+    runs-on: windows-2025
+    env:
+      BUILD_VERSION: "1.0.${{ github.run_number }}.0"
+      # 자체 서명 pfx 임시 비밀번호 (러너 내부에서만 사용, 배포물에 포함 안 됨)
+      PFX_PASSWORD: "CalcSideload!${{ github.run_id }}"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Setup NuGet
+        uses: nuget/setup-nuget@v2
+        with:
+          nuget-version: '6.x'
+
+      - name: Set version in AppxManifest
+        shell: pwsh
+        run: |
+          ./build/scripts/UpdateAppxManifestVersion.ps1 `
+            -AppxManifest ./src/Calculator/Package.appxmanifest `
+            -Version $env:BUILD_VERSION
+
+      - name: Build sideload package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          msbuild ./src/Calculator/Calculator.csproj `
+            -restore `
+            -p:Configuration=Release `
+            -p:Platform=x64 `
+            -p:AppxBundle=Always `
+            -p:AppxBundlePlatforms=x64 `
+            -p:UapAppxPackageBuildMode=SideloadOnly `
+            -p:AppxPackageSigningEnabled=false `
+            -p:GenerateAppxPackageOnBuild=true `
+            -p:Version=$env:BUILD_VERSION `
+            -maxCpuCount `
+            -bl:$env:GITHUB_WORKSPACE/output/build.binlog
+          if ($LASTEXITCODE -ne 0) { throw "msbuild failed with exit code $LASTEXITCODE" }
+
+      - name: Locate, self-sign and package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          # 1) 빌드된 패키지 찾기 (.msixbundle 우선, 없으면 .msix)
+          $pkg = Get-ChildItem -Path $env:GITHUB_WORKSPACE -Recurse -Filter *.msixbundle -ErrorAction SilentlyContinue |
+                 Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $pkg) {
+            $pkg = Get-ChildItem -Path $env:GITHUB_WORKSPACE -Recurse -Filter *.msix -ErrorAction SilentlyContinue |
+                   Where-Object { $_.FullName -match 'AppPackages' } |
+                   Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          }
+          if (-not $pkg) { throw "빌드 산출물(.msixbundle/.msix)을 찾지 못했습니다." }
+          Write-Host "Package: $($pkg.FullName)"
+
+          # 2) 매니페스트 Publisher 와 일치하는 자체 서명 인증서 생성
+          $subject = "CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US"
+          $cert = New-SelfSignedCertificate `
+            -Type Custom `
+            -Subject $subject `
+            -KeyUsage DigitalSignature `
+            -FriendlyName "Calculator Sideload Cert" `
+            -CertStoreLocation "Cert:\CurrentUser\My" `
+            -TextExtension @("2.5.29.37={text}1.3.6.1.5.5.7.3.3") `
+            -NotAfter (Get-Date).AddYears(5)
+
+          $pfxPath = Join-Path $env:RUNNER_TEMP "calc-sign.pfx"
+          $securePwd = ConvertTo-SecureString -String $env:PFX_PASSWORD -Force -AsPlainText
+          Export-PfxCertificate -Cert $cert -FilePath $pfxPath -Password $securePwd | Out-Null
+
+          # 3) signtool 찾기
+          $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter signtool.exe -ErrorAction SilentlyContinue |
+                      Where-Object { $_.FullName -match '\\x64\\' } |
+                      Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $signtool) { throw "signtool.exe 를 찾지 못했습니다." }
+          Write-Host "signtool: $($signtool.FullName)"
+
+          # 4) 패키지 서명
+          & $signtool.FullName sign /fd SHA256 /a /f $pfxPath /p $env:PFX_PASSWORD $pkg.FullName
+          if ($LASTEXITCODE -ne 0) { throw "서명 실패 (exit $LASTEXITCODE)" }
+
+          # 5) 배포 폴더 구성
+          $dist = Join-Path $env:GITHUB_WORKSPACE "dist"
+          New-Item -ItemType Directory -Force -Path $dist | Out-Null
+          $pkgName = "Calculator_x64$($pkg.Extension)"
+          Copy-Item $pkg.FullName (Join-Path $dist $pkgName)
+          Export-Certificate -Cert $cert -FilePath (Join-Path $dist "Calculator.cer") | Out-Null
+          Copy-Item "$env:GITHUB_WORKSPACE/packaging/Install.ps1"        (Join-Path $dist "Install.ps1")
+          Copy-Item "$env:GITHUB_WORKSPACE/packaging/Uninstall.ps1"      (Join-Path $dist "Uninstall.ps1")
+          Copy-Item "$env:GITHUB_WORKSPACE/packaging/README-INSTALL.txt" (Join-Path $dist "README-INSTALL.txt")
+
+          # 6) zip 생성
+          $zip = Join-Path $env:GITHUB_WORKSPACE "Calculator-Windows-x64.zip"
+          Compress-Archive -Path (Join-Path $dist '*') -DestinationPath $zip -Force
+          Write-Host "생성됨: $zip"
+
+      - name: Upload installable zip (artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: Calculator-Windows-x64
+          path: Calculator-Windows-x64.zip
+          if-no-files-found: error
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-diagnostics
+          path: |
+            output/build.binlog
+          if-no-files-found: ignore
+
+      - name: Create GitHub Release
+        if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "build-${{ github.run_number }}"
+          gh release create $tag "Calculator-Windows-x64.zip" `
+            --title "Calculator Windows x64 (build ${{ github.run_number }})" `
+            --notes "microsoft/calculator 를 빌드한 자체 서명 sideload 패키지입니다. zip 을 풀고 관리자 PowerShell 에서 Install.ps1 을 실행하세요. 설치 방법은 README-INSTALL.txt 참고."
